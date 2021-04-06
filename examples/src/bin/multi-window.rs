@@ -384,7 +384,7 @@ fn main() {
                     vertex_buffer.clone(),
                     (),
                     (),
-                    vec![],
+                    None,
                 )
                 .unwrap()
                 .end_render_pass()

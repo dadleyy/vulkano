@@ -104,7 +104,7 @@ impl TriangleDrawSystem {
                 vec![self.vertex_buffer.clone()],
                 (),
                 (),
-                vec![],
+                None,
             )
             .unwrap();
         builder.build().unwrap()

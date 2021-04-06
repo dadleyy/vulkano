@@ -290,7 +290,7 @@ fn main() {
                     vertex_buffer.clone(),
                     set.clone(),
                     (),
-                    vec![],
+                    None,
                 )
                 .unwrap()
                 .end_render_pass()

@@ -332,7 +332,7 @@ fn main() {
                         (triangle_vertex_buffer.clone(), instance_data_buffer.clone()),
                         (),
                         (),
-                        vec![],
+                        None,
                     )
                     .unwrap()
                     .end_render_pass()
