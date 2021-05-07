@@ -42,19 +42,6 @@ pub struct BaseOutStructure {
     pub p_next: *mut BaseOutStructure,
 }
 
-pub(crate) unsafe fn ptr_chain_iter<T>(ptr: &mut T) -> impl Iterator<Item = *mut BaseOutStructure> {
-    let ptr: *mut BaseOutStructure = ptr as *mut T as _;
-    (0..).scan(ptr, |p_ptr, _| {
-        if p_ptr.is_null() {
-            return None;
-        }
-        let n_ptr = (**p_ptr).p_next as *mut BaseOutStructure;
-        let old = *p_ptr;
-        *p_ptr = n_ptr;
-        Some(old)
-    })
-}
-
 pub unsafe trait ExtendsMemoryAllocateInfo {}
 unsafe impl ExtendsMemoryAllocateInfo for vk::MemoryDedicatedAllocateInfoKHR {}
 unsafe impl ExtendsMemoryAllocateInfo for vk::ExportMemoryAllocateInfo {}
@@ -137,7 +124,7 @@ impl<'a> DeviceMemoryBuilder<'a> {
     pub fn dedicated_info(mut self, dedicated: DedicatedAlloc<'a>) -> DeviceMemoryBuilder {
         assert!(self.dedicated_info.is_none());
 
-        let mut dedicated_info = match dedicated {
+        let dedicated_info = match dedicated {
             DedicatedAlloc::Buffer(buffer) => vk::MemoryDedicatedAllocateInfoKHR {
                 sType: vk::STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR,
                 pNext: ptr::null(),
@@ -153,7 +140,6 @@ impl<'a> DeviceMemoryBuilder<'a> {
             DedicatedAlloc::None => return self,
         };
 
-        self = self.push_next(&mut dedicated_info);
         self.dedicated_info = Some(dedicated_info);
         self
     }
@@ -169,13 +155,12 @@ impl<'a> DeviceMemoryBuilder<'a> {
     ) -> DeviceMemoryBuilder<'a> {
         assert!(self.export_info.is_none());
 
-        let mut export_info = vk::ExportMemoryAllocateInfo {
+        let export_info = vk::ExportMemoryAllocateInfo {
             sType: vk::STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
             pNext: ptr::null(),
             handleTypes: handle_types.into(),
         };
 
-        self = self.push_next(&mut export_info);
         self.export_info = Some(export_info);
         self
     }
@@ -200,27 +185,14 @@ impl<'a> DeviceMemoryBuilder<'a> {
             fd: fd.into_raw_fd(),
         };
 
-        self = self.push_next(&mut import_info);
         self.import_info = Some(import_info);
-        self
-    }
-
-    // Private function -- no doc comment needed!  Copied shamelessly and poorly from Ash.
-    fn push_next<T: ExtendsMemoryAllocateInfo>(self, next: &mut T) -> DeviceMemoryBuilder<'a> {
-        unsafe {
-            let next_ptr = next as *mut T as *mut BaseOutStructure;
-            let mut prev = self.allocate.pNext as *mut BaseOutStructure;
-            let last_next = ptr_chain_iter(&mut prev).last().unwrap();
-            (*last_next).p_next = next_ptr as _;
-        }
-
         self
     }
 
     /// Creates a `DeviceMemory` object on success, consuming the `DeviceMemoryBuilder`.  An error
     /// is returned if the requested allocation is too large or if the total number of allocations
     /// would exceed per-device limits.
-    pub fn build(self) -> Result<Arc<DeviceMemory>, DeviceMemoryAllocError> {
+    pub fn build(mut self) -> Result<Arc<DeviceMemory>, DeviceMemoryAllocError> {
         if self.allocate.allocationSize == 0 {
             return Err(DeviceMemoryAllocError::InvalidSize)?;
         }
@@ -268,13 +240,13 @@ impl<'a> DeviceMemoryBuilder<'a> {
 
         if self.export_info.is_some() || self.import_info.is_some() {
             // TODO: check exportFromImportedHandleTypes
-            export_handle_bits = match self.export_info {
-                Some(export_info) => export_info.handleTypes,
+            export_handle_bits = match self.export_info.as_ref() {
+                Some(export_info) => export_info.handleTypes.clone(),
                 None => 0,
             };
 
-            let import_handle_bits = match self.import_info {
-                Some(import_info) => import_info.handleType,
+            let import_handle_bits = match self.import_info.as_ref() {
+                Some(import_info) => import_info.handleType.clone(),
                 None => 0,
             };
 
@@ -324,10 +296,53 @@ impl<'a> DeviceMemoryBuilder<'a> {
             }
             let vk = self.device.pointers();
 
+            let mut allocation_info = vk::MemoryAllocateInfo {
+                pNext: ptr::null(),
+                ..self.allocate
+            };
+
+            match (
+                self.dedicated_info.as_mut(),
+                self.export_info.as_mut(),
+                self.import_info.as_mut(),
+            ) {
+                (Some(dedicated), None, None) => {
+                    allocation_info.pNext =
+                        dedicated as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                }
+                (Some(dedicated), Some(export), None) => {
+                    dedicated.pNext = export as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                    allocation_info.pNext =
+                        dedicated as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                }
+                (Some(dedicated), Some(export), Some(import)) => {
+                    export.pNext = import as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                    dedicated.pNext = export as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                    allocation_info.pNext =
+                        dedicated as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                }
+                (Some(dedicated), None, Some(import)) => {
+                    dedicated.pNext = import as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                    allocation_info.pNext =
+                        dedicated as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                }
+                (None, Some(export), Some(import)) => {
+                    export.pNext = import as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                    allocation_info.pNext = export as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                }
+                (None, None, Some(import)) => {
+                    allocation_info.pNext = import as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                }
+                (None, Some(export), None) => {
+                    allocation_info.pNext = export as *mut dyn ExtendsMemoryAllocateInfo as *mut _;
+                }
+                (None, None, None) => (),
+            }
+
             let mut output = MaybeUninit::uninit();
             check_errors(vk.AllocateMemory(
                 self.device.internal_object(),
-                &self.allocate,
+                &allocation_info,
                 ptr::null(),
                 output.as_mut_ptr(),
             ))?;
